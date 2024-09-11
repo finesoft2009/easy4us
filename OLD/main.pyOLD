@@ -1,0 +1,267 @@
+import os  
+import codecs  
+import argparse  
+import shutil  
+import urllib  
+import zipfile  
+from io import BytesIO  
+import requests  
+from bs4 import BeautifulSoup  
+import logging  
+
+# Настройка логирования  
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')  
+
+def detailed_log_content(content, description):  
+    try:  
+        logging.debug(f"{description} response content (partial): {content[:500]}")  
+    except UnicodeDecodeError as e:  
+        logging.error(f"Error decoding {description} response content: {str(e)}")  
+
+# Парсер аргументов  
+parser = argparse.ArgumentParser(usage="easy4us", description="decode directories with easytoyou.eu")  
+parser.add_argument("-u", "--username", required=True, help="easytoyou.eu username")  
+parser.add_argument("-p", "--password", required=True, help="easytoyou.eu password")  
+parser.add_argument("-s", "--source", required=True, help="source directory")  
+parser.add_argument("-o", "--destination", required=True, help="destination directory", default="")  
+parser.add_argument("-d", "--decoder", help="decoder (default: ic11php72)", default="ic11php72")  
+parser.add_argument("-w", "--overwrite", help="overwrite", action='store_true', default=False)  
+parser.add_argument("--account", help="fetch account membership details", action='store_true')  
+args = parser.parse_args()  
+
+base_url = "https://easytoyou.eu"  
+headers = {  
+    "Connection": "keep-alive",  
+    "Cache-Control": "max-age=0",  
+    "Upgrade-Insecure-Requests": "1",  
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",  
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",  
+    "Accept-Encoding": "gzip, deflate, br",  
+    "Accept-Language": "en-US,en;q=0.9"  
+}  
+
+not_decoded = []  
+
+def login(username, password):  
+    session = requests.Session()  
+    login = f"{base_url}/login"  
+    login_data = {"loginname": username, "password": password}  
+    try:  
+        resp = session.post(login, headers={**headers, "Content-Type": "application/x-www-form-urlencoded"}, data=login_data, allow_redirects=True)  
+        logging.debug(f"Login response URL: {resp.url}")  
+
+        # Проверка успешного логина по URL  
+        if "/account" in resp.url:  
+            logging.info("Login successful.")  
+            return session  
+
+        detailed_log_content(resp.content, "Login")  
+
+    except requests.RequestException as e:  
+        logging.error(f"Login failed: {str(e)}")  
+    return False  
+
+def get_membership_details(session):  
+    try:  
+        response = session.get(f"{base_url}/user/account.php", headers=headers)  
+        logging.debug(f"Account page response content: {response.content[:500]}")  
+        
+        soup = BeautifulSoup(response.content, 'html.parser')  
+        
+        # Найдем таблицу по классу  
+        table = soup.find('table', {'class': 'myTable'})  
+        if not table:  
+            logging.error("Membership table not found.")  
+            return None  
+
+        # Извлечение строки с необходимыми данными  
+        row = table.find('tbody').find('tr', {'class': 'odd'})  
+        if not row:  
+            logging.error("Membership details row not found.")  
+            return None  
+
+        # Извлечение нужных данных из соответствующих ячеек строк  
+        cells = row.find_all('td')  
+        if len(cells) >= 2:  
+            membership_type = cells[0].get_text(strip=True)  
+            valid_until = cells[1].get_text(strip=True)  
+            return membership_type, valid_until  
+
+    except requests.RequestException as e:  
+        logging.error(f"Failed to fetch account details: {str(e)}")  
+    
+    return None  
+
+def copy(src, dest, files):  
+    for file in files:  
+        csrc = os.path.join(src, file)  
+        cdest = os.path.join(dest, file)  
+        shutil.copyfile(csrc, cdest)  
+        logging.info(f"Copied {file} to {dest}")  
+
+def clear(session):  
+    logging.info("Clearing page...")  
+    c = 0  
+    while True:  
+        c += 1  
+        try:  
+            res = session.get(f"{base_url}/decoder/{args.decoder}/1", headers=headers)  
+            s = BeautifulSoup(res.content, features="lxml")  
+            detailed_log_content(res.content, "Clear page")  
+            inputs = s.find_all(attrs={"name": "file[]"})  
+            if not inputs:  
+                break  
+            final = "".join([f"{urllib.parse.urlencode({i['name']: i.get('value', '')})}&" for i in inputs])  
+            res = session.post(f"{base_url}/decoder/{args.decoder}/1", data=final, headers={**headers, "Content-Type": "application/x-www-form-urlencoded"})  
+            detailed_log_content(res.content, "Post clear page")  
+            logging.info(f"...{c}")  
+        except requests.RequestException as e:  
+            logging.error(f"Error clearing page: {str(e)}")  
+            break  
+
+def parse_upload_result(r):  
+    try:  
+        s = BeautifulSoup(r.content, features="lxml")  
+        success, failure = [], []  
+        for el in s.find_all("div", {"class": "alert-success"}):  
+            res = [s.strip() for s in el.text.split()]  
+            success.append(res[1])  
+        for el in s.find_all("div", {"class": "alert-danger"}):  
+            res = [s.strip() for s in el.text.split()]  
+            failure.append(res[3])  
+        return success, failure  
+    except Exception as e:  
+        logging.error(f"Error parsing upload result: {str(e)}")  
+        detailed_log_content(r.content, "Upload result parsing")  
+
+def upload(session, dir, files):  
+    logging.info(f"Preparing to upload files from directory: {dir}")  
+    r = session.get(f"{base_url}/decoder/{args.decoder}", headers=headers, timeout=300)  
+    detailed_log_content(r.content, "Upload page GET")  
+
+    s = BeautifulSoup(r.content, features="lxml")  
+    el = s.find(id="uploadfileblue")  
+    if not el:  
+        logging.error("Error: couldn't find upload form")  
+        logging.error(s.text)  
+        return  
+
+    form = el.find_parent("form")  
+    inputs = form.find_all("input", {"type": "file"}) if form else []  
+    if inputs:  
+        input_element = inputs[0]  
+        n = input_element['name']  
+        logging.info(f"Obtained dynamic name attribute: {n}")  
+    else:  
+        logging.error("No input file elements found in form")  
+        return  
+
+    upload = []  
+    for file in files:  
+        full_path = os.path.join(dir, file)  
+        if file.endswith(".php"):  
+            logging.info(f"Adding file to upload list: {full_path}")  
+            try:  
+                with codecs.open(full_path, 'rb') as full:  
+                    upload.append((n, (file, full, "application/x-php")))  
+            except Exception as e:  
+                logging.error(f"Failed to read file {full_path}: {str(e)}")  
+
+    upload.append(("submit", (None, "Decode")))  
+
+    if upload:   
+        logging.info(f"Uploading {len(upload)-1} files...")  
+        try:  
+            r = session.post(f"{base_url}/decoder/{args.decoder}", headers=headers, files=upload)  
+            detailed_log_content(r.content, "Upload response")  
+            return parse_upload_result(r)  
+        except requests.RequestException as e:  
+            logging.error(f"Error uploading files: {str(e)}")  
+    else:  
+        logging.warning("No files to upload.")  
+        return [], []  
+
+def download_zip(session, outpath):  
+    if not os.path.exists(outpath):  
+        os.makedirs(outpath)  
+    try:  
+        r = session.get(f"{base_url}/download.php?id=all", headers=headers)  
+        detailed_log_content(r.content, "Download zip")  
+        with zipfile.ZipFile(BytesIO(r.content)) as zf:  
+            for name in zf.namelist():  
+                data = zf.read(name)  
+                dest = os.path.join(outpath, os.path.basename(name))  
+                with open(dest, 'wb+') as f:  
+                    f.write(data)  
+                logging.info(f"Wrote {len(data)} bytes to {dest}")  
+        return True  
+    except Exception as e:  
+        logging.error(f"Download failed: {str(e)}")  
+        return False  
+
+def batch(iterable, n=1):  
+    l = len(iterable)  
+    for ndx in range(0, l, n):  
+        yield iterable[ndx:min(ndx + n, l)]  
+
+def process_files(session, dir, dest, phpfiles):  
+    logging.info(f"Uploading {len(phpfiles)} files...")  
+    res = upload(session, dir, phpfiles)  
+    if res:  
+        success, failure = res  
+        logging.info(f"Done. {len(success)} successful, {len(failure)} failed.")  
+        not_decoded.extend([os.path.join(dir, f) for f in failure])  
+        if success:  
+            if not download_zip(session, dest):  
+                logging.warning("Couldn't download. Copying originals and continuing")  
+                not_decoded.extend([os.path.join(dir, f) for f in phpfiles])  
+            clear(session)  
+
+    # Дополнительная проверка на этапах декодирования  
+    logging.info(f"Checking contents of directory: {dest}")  
+    for filename in phpfiles:  
+        src_file = os.path.join(dir, filename)  
+        dst_file = os.path.join(dest, filename)  
+        if os.path.exists(dst_file):  
+            logging.info(f"File {filename} decoded and saved successfully in {dest}")  
+        else:  
+            logging.error(f"Decoding failed for file {filename}, it's missing in destination")  
+
+if __name__ == '__main__':  
+    if not args.destination:  
+        args.destination = f"{os.path.basename(args.source)}_decoded"  
+    session = login(args.username, args.password)  
+    if session:  
+        if args.account:  
+            details = get_membership_details(session)  
+            if details:  
+                membership_type, valid_until = details  
+                logging.info(f"Account valid until {valid_until}.")  
+            else:  
+                logging.error("Could not retrieve membership details.")  
+        clear(session)  
+        for dir, dirnames, filenames in os.walk(args.source):  
+            logging.info(f"Descended into {dir}")  
+            rel = os.path.relpath(dir, args.source)  
+            dest = os.path.join(args.destination, rel).strip(".")  
+            if not os.path.exists(dest):  
+                os.makedirs(dest)  
+            phpfiles, other = [], []  
+            for f in filenames:  
+                csrc = os.path.join(dir, f)  
+                if f.endswith(".php") and b"ionCube Loader" in open(csrc, "rb").read():  
+                    phpfiles.append(f)  
+                else:  
+                    other.append(f)  
+
+            copy(dir, dest, other)  
+
+            if not args.overwrite:  
+                phpfiles = [f for f in phpfiles if not os.path.exists(os.path.join(dest, f))]  
+
+            if phpfiles:  
+                for f in batch(phpfiles, 25):  
+                    process_files(session, dir, dest, f)  
+        logging.info("Finished. IonCube files that failed to decode:")  
+        for f in not_decoded:  
+            logging.info(f)
