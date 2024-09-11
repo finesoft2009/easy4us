@@ -50,4 +50,3 @@ python3 main.py -u dj_bit -p 789852 -s /1/dec.php -o /2/dec.php -d ic11php70 -w 
 =======
 # easy4us
 /easy4us.git
->>>>>>> 3dccd4c975de6bfc2b992368d2e3dd4cf9b7ce90
