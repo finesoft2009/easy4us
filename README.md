@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # easy4us  
 
 `easy4us` - это Python-утилита для декодирования ionCube PHP файлов с использованием сайта **easytoyou.eu**. Этот инструмент автоматизирует процесс логина, загрузки и скачивания файлов с декодером easytoyou.eu.  
@@ -47,3 +48,7 @@ python3 main.py -u ИМЯ_ПОЛЬЗОВАТЕЛЯ -p ПАРОЛЬ -s ИСТОЧ
 python3 main.py -u dj_bit -p 789852 -s /1/dec.php -o /2/dec.php -d ic11php70 -w --account
 Лицензия
 Этот проект лицензируется под лицензией MIT. См. файл LICENSE для получения подробной информации.
+=======
+# easy4us
+/easy4us.git
+>>>>>>> 3dccd4c975de6bfc2b992368d2e3dd4cf9b7ce90
